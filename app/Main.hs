@@ -1310,6 +1310,7 @@ instance Arbitrary Rotation where
     arbitrary = oneof (map return allRotations)
 
 prop_solve scramble = within 5000000 $
+    collect (length scramble) $
     case result of
         (Left _) -> False
         (Right (outCube, sol)) ->
