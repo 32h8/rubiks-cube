@@ -1,10 +1,10 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.33.0.
+-- This file has been generated from package.yaml by hpack version 0.34.4.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: bdd6263c6705688212fb168ae5ba198c903c2e72748ebd4686356449d87843e9
+-- hash: e2dec1e5a9eb1679c43d2e01ed38298eb4e33c910bba2a6ea7e15e83d6d0c9b0
 
 name:           rubiks-cube
 version:        0.1.0.0
@@ -35,6 +35,7 @@ library
   build-depends:
       QuickCheck
     , base >=4.7 && <5
+    , mtl
   default-language: Haskell2010
 
 executable rubiks-cube-exe
@@ -47,6 +48,7 @@ executable rubiks-cube-exe
   build-depends:
       QuickCheck
     , base >=4.7 && <5
+    , mtl
     , rubiks-cube
   default-language: Haskell2010
 
@@ -61,5 +63,6 @@ test-suite rubiks-cube-test
   build-depends:
       QuickCheck
     , base >=4.7 && <5
+    , mtl
     , rubiks-cube
   default-language: Haskell2010

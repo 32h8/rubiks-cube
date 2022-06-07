@@ -5,7 +5,10 @@ import System.Environment ( getArgs )
 
 import Data.List
 import Data.Maybe
-  
+
+import Control.Monad.Except
+import Control.Monad.Writer.Strict
+
 -- Cube text format description
 -- example: solved cube (W-White, O-Oragne, G-Green, R-Red, B-Blue, Y-Yellow)
 --         WWW
@@ -29,6 +32,11 @@ import Data.Maybe
 --  down face is Yellow 
 --
 -- See file cube.txt for another example
+
+type Puzzle = ExceptT String (Writer [Rotation])
+
+runPuzzle :: Puzzle a -> (Either String a, [Rotation])
+runPuzzle = runWriter . runExceptT 
 
 type Cube = [CubeElement]
 
@@ -187,8 +195,6 @@ data Rotation = F | F' | B | B' | L | L' | R | R' | U | U' | D | D' deriving (Eq
 
 allRotations :: [Rotation]
 allRotations = [F, F', B, B', L, L', R, R', U, U', D, D']
-
-type CubeAndRotations = (Cube, [Rotation]) -- TODO rename type
 
 isCenter :: CubeElement -> Bool
 isCenter (Center _ _) = True
@@ -566,20 +572,18 @@ translateFrom :: Face -> [Rotation] -> [Rotation]
 translateFrom face = map (translateRotationFrom face)
 
 
-withCubeRotationTo :: Face -> Cube -> (Cube -> Either String CubeAndRotations) -> Either String CubeAndRotations
+withCubeRotationTo :: Face -> Cube -> (Cube -> Puzzle Cube) -> Puzzle Cube
 withCubeRotationTo face cube f = do
     let c = rotateCubeTo face cube
-    (c2, rot) <- f c
-    let c3 = undoRotateCubeTo face c2
-    return (c3, translateFrom face rot)
+    c2 <- censor (translateFrom face) $ f c
+    return $ undoRotateCubeTo face c2
 
-withCubeUpsideDown :: Cube -> (Cube -> Either String CubeAndRotations) -> Either String CubeAndRotations
+withCubeUpsideDown :: Cube -> (Cube -> Puzzle Cube) -> Puzzle Cube
 withCubeUpsideDown cube f = do
     let cubeUpsideDown = rotateCubeTo FaceD $ rotateCubeTo FaceD cube
-    (cubeUpsideDown2, steps) <- f cubeUpsideDown
+    cubeUpsideDown2 <- censor (translateFrom FaceD . translateFrom FaceD) $ f cubeUpsideDown
     let cube2 = undoRotateCubeTo FaceD $ undoRotateCubeTo FaceD cubeUpsideDown2
-    let steps2 = translateFrom FaceD $ translateFrom FaceD steps
-    return (cube2, steps2)
+    return cube2
 
 
 equal :: Eq a => [a] -> Bool
@@ -703,30 +707,26 @@ checkStep7 cube =
             $ center f cube
         has6Colors = 6 == length (nub centerColors)
 
-prepend :: [Rotation] -> CubeAndRotations -> CubeAndRotations
-prepend rs (c,rs2) = (c, rs ++ rs2)
-
-step1 :: Cube -> Either String CubeAndRotations
-step1 cube = do
-   (cube2, r1) <- step1fixFrontFace cube
-   (cube3, r2) <- withCubeRotationTo FaceL cube2 step1fixFrontFace
-   (cube4, r3) <- withCubeRotationTo FaceR cube3 step1fixFrontFace
-   (cube5, r4) <- withCubeRotationTo FaceB cube4 step1fixFrontFace
-   return (cube5, r1 ++ r2 ++ r3 ++ r4)
+step1 :: Cube -> Puzzle Cube
+step1 cube = 
+    step1fixFrontFace cube >>=
+    flip (withCubeRotationTo FaceL) step1fixFrontFace >>=
+    flip (withCubeRotationTo FaceR) step1fixFrontFace >>=
+    flip (withCubeRotationTo FaceB) step1fixFrontFace
 
 -- solves only front face of step1
 -- algorithm
 -- https://ruwix.com/the-rubiks-cube/how-to-solve-the-rubiks-cube-beginners-method/step-1-first-layer-edges/
-step1fixFrontFace :: Cube -> Either String CubeAndRotations
+step1fixFrontFace :: Cube -> Puzzle Cube
 step1fixFrontFace cube
     -- case: needed edge is on front face
-    | faceOK = Right (cube, [])
-    | rotateFisEnough = Right (rotate F cube, [F])
-    | rotateF2isEnough = Right (rotate F $ rotate F cube, [F,F])
-    | rotateF'isEnough = Right (rotate F' cube, [F'])
+    | faceOK = return cube
+    | rotateFisEnough = tell [F] >> return (rotate F cube)
+    | rotateF2isEnough = tell [F,F] >> return (rotate F $ rotate F cube)
+    | rotateF'isEnough = tell [F'] >> return (rotate F' cube)
     | flipFUedge =
         let flipAlg = [F,U',R,U]
-        in Right (doRotations flipAlg cube, flipAlg)
+        in tell flipAlg >> return (doRotations flipAlg cube)
     | rotateFandRestart = restartAfter [F]
     | rotateF'andRestart = restartAfter [F']
     | rotateF2andRestart = restartAfter [F,F]
@@ -741,7 +741,7 @@ step1fixFrontFace cube
     | rotateB2andRestart = restartAfter [B,B]
     | rotateL2andRestart = restartAfter [L,L]
     | rotateR2andRestart = restartAfter [R,R]
-    | otherwise = Left "step1 failed"
+    | otherwise = throwError "step1 failed"
     where
         uCenterColor = centerColor $ centerU cube
         fCenterColor = centerColor $ centerF cube
@@ -766,9 +766,10 @@ step1fixFrontFace cube
             let e = edgeFU cube
             in fCenterColor == colorU e && uCenterColor == colorF e
 
-        restartAfter :: [Rotation] -> Either String CubeAndRotations
-        restartAfter alg =
-            fmap (prepend alg) $ step1fixFrontFace $ doRotations alg cube
+        restartAfter :: [Rotation] -> Puzzle Cube
+        restartAfter alg = do
+            tell alg 
+            step1fixFrontFace $ doRotations alg cube
 
         needColors = [uCenterColor, fCenterColor]
         rotateFandRestart =
@@ -816,18 +817,17 @@ step1fixFrontFace cube
             let e = edgeRU cube
             in sort (colors e) == sort needColors
 
-step2 :: Cube -> Either String CubeAndRotations
-step2 cube = do
-    (c2, r1) <- frontTopRightCornerFix cube
-    (c3, r2) <- withCubeRotationTo FaceL c2 frontTopRightCornerFix
-    (c4, r3) <- withCubeRotationTo FaceR c3 frontTopRightCornerFix
-    (c5, r4) <- withCubeRotationTo FaceB c4 frontTopRightCornerFix
-    return (c5, r1 ++ r2 ++ r3 ++ r4)
+step2 :: Cube -> Puzzle Cube
+step2 cube = 
+    frontTopRightCornerFix cube >>=
+    flip (withCubeRotationTo FaceL) frontTopRightCornerFix >>=
+    flip (withCubeRotationTo FaceR) frontTopRightCornerFix >>=
+    flip (withCubeRotationTo FaceB) frontTopRightCornerFix
 
 -- this function fixes only one corner: front top right corner
-frontTopRightCornerFix :: Cube -> Either String CubeAndRotations
+frontTopRightCornerFix :: Cube -> Puzzle Cube
 frontTopRightCornerFix cube
-    | cornerOK = Right (cube,[])
+    | cornerOK = return cube
     | iterateAlg = restartAfter alg
     -- case: corner is on down face
     | rotateDandRestart = restartAfter [D]
@@ -837,17 +837,23 @@ frontTopRightCornerFix cube
     | moveFRUcornerDownAndRestart = restartAfter moveFRUcornerDownAlg
     | neededCornerIsFLU = do
         let face = FaceL
-        (cube2, r) <- withCubeRotationTo face cube $ \c -> Right (doRotations moveFRUcornerDownAlg c, moveFRUcornerDownAlg)
-        fmap (prepend r) $ frontTopRightCornerFix cube2
+        cube2 <- withCubeRotationTo face cube $ \c -> do
+            tell moveFRUcornerDownAlg
+            return $ doRotations moveFRUcornerDownAlg c
+        frontTopRightCornerFix cube2
     | neededCornerIsRUB = do
         let face = FaceR
-        (cube2, r) <- withCubeRotationTo face cube $ \c -> Right (doRotations moveFRUcornerDownAlg c, moveFRUcornerDownAlg)
-        fmap (prepend r) $ frontTopRightCornerFix cube2
+        cube2 <- withCubeRotationTo face cube $ \c -> do
+            tell moveFRUcornerDownAlg
+            return $ doRotations moveFRUcornerDownAlg c
+        frontTopRightCornerFix cube2
     | neededCornerIsLUB = do
         let face = FaceB
-        (cube2, r) <- withCubeRotationTo face cube $ \c -> Right (doRotations moveFRUcornerDownAlg c, moveFRUcornerDownAlg)
-        fmap (prepend r) $ frontTopRightCornerFix cube2
-    | otherwise = Left "step2 failed"
+        cube2 <- withCubeRotationTo face cube $ \c -> do 
+            tell moveFRUcornerDownAlg
+            return $ doRotations moveFRUcornerDownAlg c
+        frontTopRightCornerFix cube2
+    | otherwise = throwError "step2 failed"
     where
         uCenterColor = centerColor $ centerU cube
         fCenterColor = centerColor $ centerF cube
@@ -864,7 +870,7 @@ frontTopRightCornerFix cube
         iterateAlg = sort (colors frdCorner) == sort needColors
 
         restartAfter rot =
-            fmap (prepend rot) $ frontTopRightCornerFix $ doRotations rot cube
+            tell rot >> frontTopRightCornerFix (doRotations rot cube)
 
         rotateDandRestart =
             let c = cornerFLD cube
@@ -894,32 +900,31 @@ frontTopRightCornerFix cube
             in sort (colors c) == sort needColors
 
 
-step3 :: Cube -> Either String CubeAndRotations
+step3 :: Cube -> Puzzle Cube
 step3 cube = withCubeUpsideDown cube solveSecondLayerAllFaces
 
 -- precondition: solved step2 AND cube rotated upside down!
-solveSecondLayerAllFaces :: Cube -> Either String CubeAndRotations
-solveSecondLayerAllFaces c = do
-    (c1,r1) <- solveSecondLayerFrontFace c
-    (c2,r2) <- withCubeRotationTo FaceL c1 solveSecondLayerFrontFace
-    (c3,r3) <- withCubeRotationTo FaceR c2 solveSecondLayerFrontFace
-    (c4,r4) <- withCubeRotationTo FaceB c3 solveSecondLayerFrontFace
-    return (c4, r1 ++ r2 ++ r3 ++ r4)
+solveSecondLayerAllFaces :: Cube -> Puzzle Cube
+solveSecondLayerAllFaces c =
+    solveSecondLayerFrontFace c >>=
+    flip (withCubeRotationTo FaceL) solveSecondLayerFrontFace >>=
+    flip (withCubeRotationTo FaceR) solveSecondLayerFrontFace >>=
+    flip (withCubeRotationTo FaceB) solveSecondLayerFrontFace
 
 -- solves FR edge
 -- precondition: solved step2 AND cube rotated upside down!
-solveSecondLayerFrontFace :: Cube -> Either String CubeAndRotations
+solveSecondLayerFrontFace :: Cube -> Puzzle Cube
 solveSecondLayerFrontFace cube
-    | eFRok = Right (cube, [])
+    | eFRok = return cube
     | canDoRightAlg =
         let alg = rightAlg
-        in Right (doRotations alg cube, alg)
+        in tell alg >> return (doRotations alg cube)
     | wrongOrientation =
         let alg = wrongOrientationAlg
-        in Right (doRotations alg cube, alg)
+        in tell alg >> return (doRotations alg cube)
     | needEdgeFU =
         let alg = rightAlg
-        in fmap (prepend alg) $ solveSecondLayerFrontFace $ doRotations alg cube
+        in tell alg >> solveSecondLayerFrontFace (doRotations alg cube)
     -- where is needed edge? 
     -- edge is in up layer. Place edge to FU
     | needEdgeLU = tryAgainAfter [U']
@@ -927,18 +932,18 @@ solveSecondLayerFrontFace cube
     | needEdgeUB = tryAgainAfter [U,U]
     -- edges is in middle layer 
     | needEdgeFL = do
-        (cube2,r) <- moveFRedgeToFUafterRotationTo FaceL
-        (cube3,r2) <- solveSecondLayerFrontFace cube2
-        return (cube3, r ++ r2)
+        cube2 <- moveFRedgeToFUafterRotationTo FaceL
+        cube3 <- solveSecondLayerFrontFace cube2
+        return cube3
     | needEdgeRB = do
-        (cube2,r) <- moveFRedgeToFUafterRotationTo FaceR
-        (cube3,r2) <- solveSecondLayerFrontFace cube2
-        return (cube3, r ++ r2)
+        cube2 <- moveFRedgeToFUafterRotationTo FaceR
+        cube3 <- solveSecondLayerFrontFace cube2
+        return cube3
     | needEdgeLB = do
-        (cube2,r) <- moveFRedgeToFUafterRotationTo FaceB
-        (cube3,r2) <- solveSecondLayerFrontFace cube2
-        return (cube3, r ++ r2)
-    | otherwise = Left "step3 failed"
+        cube2 <- moveFRedgeToFUafterRotationTo FaceB
+        cube3 <- solveSecondLayerFrontFace cube2
+        return cube3
+    | otherwise = throwError "step3 failed"
     where
         fCenterColor = centerColor $ centerF cube
         lCenterColor = centerColor $ centerL cube
@@ -981,29 +986,32 @@ solveSecondLayerFrontFace cube
         needEdgeFL = sort needColorsForEdgeFR == sort (colors eFL)
         needEdgeRB = sort needColorsForEdgeFR == sort (colors eRB)
 
-        tryAgainAfter alg =
-            fmap (prepend alg) $ solveSecondLayerFrontFace $ doRotations alg cube
+        tryAgainAfter alg = do
+            tell alg
+            solveSecondLayerFrontFace $ doRotations alg cube
 
         moveFRedgeToFUafterRotationTo face =
             withCubeRotationTo face cube
                 $ \c -> let a = edgeFRtoFUalg
-                        in Right (doRotations a c, a)
+                        in do 
+                            tell a
+                            return $ doRotations a c
 
 
-step4 :: Cube -> Either String CubeAndRotations
+step4 :: Cube -> Puzzle Cube
 step4 cube = withCubeUpsideDown cube anotherCross
 
 -- precondition: cube rotated upsidedown! 
-anotherCross :: Cube -> Either String CubeAndRotations
+anotherCross :: Cube -> Puzzle Cube
 anotherCross cube
-    | crossOK = Right (cube,[])
-    | horizontalLine = Right (doRotations alg cube, alg)
+    | crossOK = return cube
+    | horizontalLine = tell alg >> return (doRotations alg cube)
     | verticalLine = withCubeRotationTo FaceL cube $ anotherCross
-    | bendShapeLB = fmap (prepend alg) $ anotherCross $ doRotations alg cube
+    | bendShapeLB = tell alg >> anotherCross (doRotations alg cube)
     | bendShapeRB = withCubeRotationTo FaceL cube $ anotherCross
     | bendShareFR = withCubeRotationTo FaceB cube $ anotherCross
     | bendShareFL = withCubeRotationTo FaceR cube $ anotherCross
-    | otherwise = fmap (prepend alg) $ anotherCross $ doRotations alg cube
+    | otherwise = tell alg >> anotherCross (doRotations alg cube)
     where
         crossOK = equal $ map colorU $ filter (not . isCorner) $ ofFaceU cube
         horizontalLine = equal $ map colorU $ [centerU cube, edgeLU cube, edgeRU cube]
@@ -1015,32 +1023,31 @@ anotherCross cube
 
         alg = [F,R,U,R',U',F']
 
-step5 :: Cube -> Either String CubeAndRotations -- TODO FIX 
+step5 :: Cube -> Puzzle Cube
 step5 cube = withCubeUpsideDown cube swapEdges
 
 -- precondition: cube rotated upsidedown
-swapEdges :: Cube -> Either String CubeAndRotations
-swapEdges cube = do
-    (c1,r1) <- fixFUedge cube
-    (c2,r2) <- withCubeRotationTo FaceL c1 fixFUedge
-    (c3,r3) <- withCubeRotationTo FaceR c2 fixFUedge
-    (c4,r4) <- withCubeRotationTo FaceB c3 fixFUedge
-    return (c4, r1 ++ r2 ++ r3 ++ r4)
+swapEdges :: Cube -> Puzzle Cube
+swapEdges cube = 
+    fixFUedge cube >>=
+    flip (withCubeRotationTo FaceL) fixFUedge >>=
+    flip (withCubeRotationTo FaceR) fixFUedge >>=
+    flip (withCubeRotationTo FaceB) fixFUedge
 
 -- precondition: cube rotated upsidedown
-fixFUedge :: Cube -> Either String CubeAndRotations
+fixFUedge :: Cube -> Puzzle Cube
 fixFUedge cube
-    | fuEdgeOK = Right (cube, [])
+    | fuEdgeOK = return cube
     | switchEdgesFUandLU =
         let alg = switchEdgesFUandLUalg
-        in Right (doRotations alg cube, alg)
+        in tell alg >> return (doRotations alg cube)
     | switchEdgesFUandRU =
         let alg = switchEdgesFUandRUalg
-        in Right (doRotations alg cube, alg)
+        in tell alg >> return (doRotations alg cube)
     | switchEdgesFUandUB =
         let alg = switchEdgesFUandUBalg
-        in Right (doRotations alg cube, alg)
-    | otherwise = Left "step5 failed"
+        in tell alg >> return (doRotations alg cube)
+    | otherwise = throwError "step5 failed"
     where
         fuEdge = edgeFU cube
         fuEdgeOK = centerColor (centerF cube) == colorF fuEdge
@@ -1061,7 +1068,7 @@ fixFUedge cube
         switchEdgesFUandRU = colorR ruEdge == fCenterColor
         switchEdgesFUandUB = colorB ubEdge == fCenterColor
 
-step6 :: Cube -> Either String CubeAndRotations
+step6 :: Cube -> Puzzle Cube
 step6 cube = withCubeUpsideDown cube positionCorners
 
 -- precondition: cube rotated upsidedown
@@ -1072,11 +1079,11 @@ step6 cube = withCubeUpsideDown cube positionCorners
 -- or there's only one, 
 -- or all the four pieces are correct.
 -- "
-positionCorners :: Cube -> Either String CubeAndRotations
+positionCorners :: Cube -> Puzzle Cube
 positionCorners cube
-    | cornersOK = Right (cube, [])
+    | cornersOK = return cube
     | cFRUok =
-        fmap (prepend alg) $ positionCorners $ doRotations alg cube
+        tell alg >> positionCorners (doRotations alg cube)
     | cFLUok =
         withCubeRotationTo FaceL cube positionCorners
     | cLUBok =
@@ -1084,7 +1091,7 @@ positionCorners cube
     | cRUBok =
         withCubeRotationTo FaceR cube positionCorners
     | otherwise =
-        fmap (prepend alg) $ positionCorners $ doRotations alg cube
+        tell alg >> positionCorners (doRotations alg cube)
     where
         cFRU = cornerFRU cube
         cFLU = cornerFLU cube
@@ -1111,20 +1118,20 @@ positionCorners cube
 
         alg = [U,R,U',L',U,R',U',L]
 
-step7 :: Cube -> Either String CubeAndRotations
+step7 :: Cube -> Puzzle Cube
 step7 cube = withCubeUpsideDown cube orientCorners
 
 -- preconition: cube rotated upsidedown
-orientCorners :: Cube -> Either String CubeAndRotations
+orientCorners :: Cube -> Puzzle Cube
 orientCorners cube
     | uFaceOK =
-        if checkStep7 cube -- TODO use local function
-        then Right (cube, [])
-        else fmap (prepend [U]) $ orientCorners $ rotateU cube
+        if checkStep7 cube
+        then return cube
+        else tell [U] >> orientCorners (rotateU cube)
     | uCenterColor == fruCornerColorU =
-         fmap (prepend [U]) $ orientCorners $ rotateU cube
+        tell [U] >> orientCorners (rotateU cube)
     | otherwise =
-        fmap (prepend alg) $ orientCorners $ doRotations alg cube
+        tell alg >> orientCorners (doRotations alg cube)
     where
         uFaceOK = equal $ map colorU $ ofFaceU cube
         uCenterColor = centerColor $ centerU cube
@@ -1132,52 +1139,51 @@ orientCorners cube
 
         alg = [R',D',R,D]
 
-solve :: Cube -> Either String CubeAndRotations
-solve c = do
-    (c1,r1) <- step1 c
-    (c2,r2) <- step2 c1
-    (c3,r3) <- step3 c2
-    (c4,r4) <- step4 c3
-    (c5,r5) <- step5 c4
-    (c6,r6) <- step6 c5
-    (c7,r7) <- step7 c6
-    return (c7, r1 ++ r2 ++ r3 ++ r4 ++ r5 ++ r6 ++ r7 )
+solve :: Cube -> Puzzle Cube
+solve c =
+    step1 c >>=
+    step2 >>= 
+    step3 >>= 
+    step4 >>= 
+    step5 >>=
+    step6 >>=
+    step7
 
-solveChecked :: Cube -> Either String CubeAndRotations
+solveChecked :: Cube -> Puzzle Cube
 solveChecked c = do
-    seemsValid c
-    (c1,r1) <- step1 c
-    check c1 checkStep1 "step 1 result is invalid"
-    checkRotations r1 c c1 "rotations from step 1 are invalid"
+    liftEither $ seemsValid c
+    (c1,r1) <- listen $ step1 c
+    liftEither $ check c1 checkStep1 "step 1 result is invalid"
+    liftEither $ checkRotations r1 c c1 "rotations from step 1 are invalid"
 
-    (c2,r2) <- step2 c1
-    check c2 checkStep2 "step 2 result is invalid"
-    checkRotations r2 c1 c2 "rotations from step 2 are invalid"
+    (c2,r2) <- listen $ step2 c1
+    liftEither $ check c2 checkStep2 "step 2 result is invalid"
+    liftEither $ checkRotations r2 c1 c2 "rotations from step 2 are invalid"
 
-    (c3,r3) <- step3 c2
-    check c3 checkStep3 "step 3 result is invalid"
-    checkRotations r3 c2 c3 "rotations from step 3 are invalid"
+    (c3,r3) <- listen $ step3 c2
+    liftEither $ check c3 checkStep3 "step 3 result is invalid"
+    liftEither $ checkRotations r3 c2 c3 "rotations from step 3 are invalid"
 
-    (c4,r4) <- step4 c3
-    check c4 checkStep4 "step 4 result is invalid"
-    checkRotations r4 c3 c4 "rotations from step 4 are invalid"
+    (c4,r4) <- listen $ step4 c3
+    liftEither $ check c4 checkStep4 "step 4 result is invalid"
+    liftEither $ checkRotations r4 c3 c4 "rotations from step 4 are invalid"
 
-    (c5,r5) <- step5 c4
-    check c5 checkStep5 "step 5 result is invalid"
-    checkRotations r5 c4 c5 "rotations from step 5 are invalid"
+    (c5,r5) <- listen $ step5 c4
+    liftEither $ check c5 checkStep5 "step 5 result is invalid"
+    liftEither $ checkRotations r5 c4 c5 "rotations from step 5 are invalid"
 
-    (c6,r6) <- step6 c5
-    check c6 checkStep6 "step 6 result is invalid"
-    checkRotations r6 c5 c6 "rotations from step 6 are invalid"
+    (c6,r6) <- listen $ step6 c5
+    liftEither $ check c6 checkStep6 "step 6 result is invalid"
+    liftEither $ checkRotations r6 c5 c6 "rotations from step 6 are invalid"
 
-    (c7,r7) <- step7 c6
-    check c7 checkStep7 "step 7 result is invalid"
-    checkRotations r7 c6 c7 "rotations from step 7 are invalid"
+    (c7,r7) <- listen $ step7 c6
+    liftEither $ check c7 checkStep7 "step 7 result is invalid"
+    liftEither $ checkRotations r7 c6 c7 "rotations from step 7 are invalid"
 
     let rotations = r1 ++ r2 ++ r3 ++ r4 ++ r5 ++ r6 ++ r7
-    checkRotations rotations c c7 "rotations error"
+    liftEither $ checkRotations rotations c c7 "rotations error"
 
-    return (c7, rotations)
+    return c7
     where
         check cube f failMsg =
             if f cube
@@ -1270,9 +1276,9 @@ main = do
     case inputValid of
         (Right _) -> do
             putStrLn "input cube seems valid"
-            case solveChecked cube of
-                (Left msg) -> putStrLn $ "solving failed with message: " ++ msg
-                (Right (c,rot)) -> do
+            case runPuzzle $ solveChecked cube of
+                (Left msg, _) -> putStrLn $ "solving failed with message: " ++ msg
+                (Right c, rot) -> do
                     putStrLn "solving succeded."
                     putStrLn "result cube: "
                     putStrLn $ prettyCube c
@@ -1313,8 +1319,8 @@ prop_solve scramble = within 5000000 $
     collect (length scramble) $
     case result of
         (Left _) -> False
-        (Right (outCube, sol)) ->
+        (Right outCube) ->
             checkStep7 outCube && outCube == doRotations sol inCube
     where
         inCube = doRotations scramble exampleSolvedCube
-        result = solve inCube
+        (result, sol) = runPuzzle $ solve inCube
